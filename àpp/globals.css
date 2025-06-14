@@ -1,0 +1,120 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body {
+    font-family: 'Inter', sans-serif;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    min-height: 100vh;
+    background-color: #f8f9fa; /* Light gray/white background */
+    color: #2d3436; /* Dark gray for text */
+    margin: 0;
+    overflow-x: hidden;
+}
+
+/* --- Start Screen --- */
+#startScreen {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+}
+
+#startButton {
+    background: linear-gradient(145deg, #1565c0, #0d47a1);
+    border: none;
+    width: 160px;
+    height: 160px;
+    border-radius: 9999px;
+    box-shadow: 0 10px 25px -5px rgba(21, 101, 192, 0.4), 0 8px 10px -6px rgba(21, 101, 192, 0.2);
+    cursor: pointer;
+    transition: transform 0.2s ease-out, box-shadow 0.2s ease-out;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+#startButton:hover {
+    transform: scale(1.05);
+    box-shadow: 0 20px 30px -10px rgba(21, 101, 192, 0.5), 0 10px 15px -8px rgba(21, 101, 192, 0.3);
+}
+
+#startButton:active {
+    transform: scale(0.98);
+}
+
+#startButton:disabled {
+    background: #4a4a6a;
+    cursor: not-allowed;
+    opacity: 0.5;
+}
+
+#startScreen h1 {
+    color: #0d47a1;
+    font-weight: bold;
+    font-size: 2.25rem;
+    margin-bottom: 2rem;
+}
+
+#startScreen p {
+    color: #636e72;
+    margin-top: 1.5rem;
+    font-size: 1.1rem;
+}
+
+/* --- Main App --- */
+#mainApp {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    width: 100%;
+}
+
+.app-container {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    width: 100%;
+    max-width: 800px;
+    padding: 20px;
+    box-sizing: border-box;
+}
+
+#visualizationCanvas {
+    border-radius: 12px;
+}
+
+.status-container {
+    margin-top: 20px;
+    text-align: center;
+}
+
+.status-container p {
+    margin: 4px 0;
+    color: #636e72;
+}
+
+#sttStatusMessage {
+    font-size: 0.9rem;
+    color: #1565c0;
+}
+
+@media (min-width: 769px) {
+    #visualizationCanvas {
+        width: 600px;
+        height: 400px;
+    }
+}
+
+@media (max-width: 768px) {
+    #visualizationCanvas {
+        width: 90vw;
+        height: 60vw;
+    }
+}

@@ -1,0 +1,727 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Juliette</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>        body {
+            font-family: 'Inter', sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            background-color: #f8f9fa; /* Light gray/white background */
+            color: #2d3436; /* Dark gray for text */
+            margin: 0;
+            overflow-x: hidden;
+        }
+        /* --- Start Screen --- */
+        #startScreen { display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; }        #startButton {
+            background: linear-gradient(145deg, #1565c0, #0d47a1);
+            border: none;
+            width: 160px; height: 160px;
+            border-radius: 9999px;
+            box-shadow: 0 10px 25px -5px rgba(21, 101, 192, 0.4), 0 8px 10px -6px rgba(21, 101, 192, 0.2);
+            cursor: pointer;
+            transition: transform 0.2s ease-out, box-shadow 0.2s ease-out;
+            display: flex; align-items: center; justify-content: center;
+        }
+        #startButton:hover { transform: scale(1.05); box-shadow: 0 20px 30px -10px rgba(21, 101, 192, 0.5), 0 10px 15px -8px rgba(21, 101, 192, 0.3); }
+        #startButton:active { transform: scale(0.98); }
+        #startButton:disabled { background: #4a4a6a; cursor: not-allowed; opacity: 0.5; }        #startScreen h1 { color: #0d47a1; font-weight: bold; font-size: 2.25rem; margin-bottom: 2rem; }
+        #startScreen p { color: #636e72; margin-top: 1.5rem; font-size: 1.1rem; }
+
+        /* --- Main App --- */
+        #mainApp { display: none; flex-direction: column; align-items: center; justify-content: center; width: 100%; }
+        .app-container { display: flex; flex-direction: column; align-items: center; justify-content: center; width: 100%; max-width: 800px; padding: 20px; box-sizing: border-box; }        #visualizationCanvas { border-radius: 12px; }
+        .status-container { margin-top: 20px; text-align: center; }
+        .status-container p { margin: 4px 0; color: #636e72; }
+        #sttStatusMessage { font-size: 0.9rem; color: #1565c0; }
+
+        @media (min-width: 769px) { #visualizationCanvas { width: 600px; height: 400px; } }
+        @media (max-width: 768px) { #visualizationCanvas { width: 90vw; height: 60vw; } }
+    </style>
+</head>
+<body>
+
+    <div id="startScreen">
+        <h1>Lnkr Support</h1>
+        <button id="startButton">
+            <svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"></path>
+                <path d="M19 10v2a7 7 0 0 1-14 0v-2"></path>
+                <line x1="12" y1="19" x2="12" y2="23"></line>
+            </svg>
+        </button>
+        <p>Click the microphone to begin</p>
+    </div>
+
+    <div id="mainApp">
+        <div class="app-container">
+            <canvas id="visualizationCanvas"></canvas>
+            <div id="statusMessages" class="status-container">
+                <p id="statusMessage">Initializing...</p>
+                <p id="sttStatusMessage">Connecting to speech service...</p>
+            </div>
+        </div>
+    </div>
+    
+    <script>
+        // --- Element Selection ---
+        const startScreen = document.getElementById('startScreen');
+        const mainApp = document.getElementById('mainApp');
+        const startButton = document.getElementById('startButton');
+        const canvas = document.getElementById('visualizationCanvas');
+        const statusMessage = document.getElementById('statusMessage');
+        const sttStatusMessage = document.getElementById('sttStatusMessage');
+        const canvasCtx = canvas.getContext('2d');        // --- State and API Variables ---        let audioContext, analyser, microphoneStream, dataArray, bufferLength, animationFrameId;
+        let websocket, isListening = false, isRecording = false;
+        let activityLevel = 0;
+        let silenceStart = 0;
+        let logCounter = 0;
+        let isVoiceActive = false; // New state to track voice detection separate from recording
+          // Enhanced VAD variables
+        let activityHistory = [];
+        let recordingStartTime = 0;
+          // --- Configuration ---
+        const SILENCE_THRESHOLD = 2; // TEMPORARILY LOWERED from 5 to 2 for debugging
+        const ACTIVITY_DECAY = 0.01; // Rate at which the activity level decays.
+        const MIN_SILENCE_DURATION_TO_PAUSE = 2000; // 2s of silence to pause streaming (isRecording=false).
+        const MAX_SILENCE_DURATION_TO_DISCONNECT = 5000; // 5s of silence to close the connection.
+        const MIN_ACTIVITY_DURATION = 50; // Reduced from 200ms to 50ms for much faster response
+        const ACTIVITY_HISTORY_SIZE = 10;
+        
+        // --- WebSocket Configuration ---
+        const WS_PROTOCOL = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const WS_HOST = window.location.host;
+        const WS_URL = `${WS_PROTOCOL}//${WS_HOST}/api/v1/ws/speech-to-text?language=ar-EG&sample_rate=16000&encoding=LINEAR16`;
+
+                // --- Console Log Forwarding ---
+        const originalConsole = {
+            log: console.log.bind(console),
+            warn: console.warn.bind(console),
+            error: console.error.bind(console),
+            debug: console.debug.bind(console),
+        };
+
+        function sendLogToServer(level, args) {
+            if (websocket && websocket.readyState === WebSocket.OPEN) {
+                const message = Array.from(args).map(arg => {
+                    if (typeof arg === 'object' && arg !== null) {
+                        try { return JSON.stringify(arg); } catch (e) { return arg.toString(); }
+                    }
+                    return arg;
+                }).join(' ');
+
+                websocket.send(JSON.stringify({
+                    type: "client_log",
+                    level: level,
+                    message: message,
+                    timestamp: Date.now()
+                }));
+            }
+        }
+        console.log = (...args) => { originalConsole.log(...args); sendLogToServer('log', args); };
+        console.warn = (...args) => { originalConsole.warn(...args); sendLogToServer('warn', args); };
+        console.error = (...args) => { originalConsole.error(...args); sendLogToServer('error', args); };
+        console.debug = (...args) => { originalConsole.debug(...args); sendLogToServer('debug', args); };
+
+        // --- UI & Canvas Functions ---
+        
+        function drawDefaultCanvasState() {
+            if (!canvasCtx) return;
+            canvasCtx.clearRect(0, 0, canvas.width, canvas.height);
+            canvasCtx.fillStyle = '#636e72';
+            canvasCtx.textAlign = 'center';
+            canvasCtx.font = `${Math.min(20, canvas.width / 25)}px Inter`;
+              let message = 'Session ended. Click mic to start again.';
+            if (isListening) {
+                if (isRecording) {
+                    message = 'Recording and sending audio...';
+                } else if (isVoiceActive) {
+                    message = 'Voice detected, preparing to record...';
+                } else {
+                    message = 'Listening... Speak to begin recording.';
+                }
+            } else if (mainApp.style.display === 'flex') {
+                const currentStatus = statusMessage.textContent.toLowerCase();
+                 if (currentStatus.includes("error") || currentStatus.includes("failed")) {
+                    message = statusMessage.textContent;
+                }
+            }
+            canvasCtx.fillText(message, canvas.width / 2, canvas.height / 2);
+        }
+        
+        function resizeCanvas() {
+            const isDesktop = window.innerWidth >= 769;
+            canvas.width = isDesktop ? 600 : window.innerWidth * 0.9;
+            canvas.height = isDesktop ? 400 : window.innerWidth * 0.6;
+            
+            if (!isListening) {
+                drawDefaultCanvasState();
+            }
+        }
+        
+        // --- WebSocket Functions ---
+          function setupWebSocket() {
+            console.log('Attempting to connect to:', WS_URL);
+            try {
+                websocket = new WebSocket(WS_URL);
+
+                websocket.onopen = () => {
+                    console.log("WebSocket connection opened successfully.");
+                    // sttStatusMessage.textContent = "Speech service connected.";
+                    
+                    // Send initial connection test
+                    websocket.send(JSON.stringify({
+                        type: "ping",
+                        timestamp: Date.now(),
+                        client_info: {
+                            user_agent: navigator.userAgent,
+                            sample_rate: audioContext ? audioContext.sampleRate : "unknown"
+                        }
+                    }));
+                };
+
+                websocket.onmessage = (event) => {
+                    try {
+                        const data = JSON.parse(event.data);
+                        if (data.error) {
+                            console.error("Server error:", data.error);
+                            // sttStatusMessage.textContent = `Server error: ${data.error}`;
+                            return;
+                        }
+                        // Handle transcription messages
+                        if (data.type === "transcription") {
+                            if (data.text && data.text.trim().length > 0) {
+                                // console.log(`[Transcript - Final: ${data.is_final}]: ${data.text}`);
+                                sttStatusMessage.textContent = `"${data.text}"`; // Transcription: 
+                            }
+                        }
+                        if (data.event && data.event.startsWith("stt_")) {
+                            if (data.transcript && data.transcript.trim().length > 0) {
+                                // console.log(`[Transcript - ${data.event}]: ${data.transcript}`);
+                                sttStatusMessage.textContent = `"${data.transcript}"`; // Transcription: 
+                            }
+                        } else if (data.type === "connected") {
+                            console.log("Server confirmed connection:", data);
+                            // sttStatusMessage.textContent = `Connected (${data.language}, ${data.sample_rate}Hz)`;
+                        } else if (data.type === "pong") {
+                            console.log("Received pong from server:", data);
+                        // } else {
+                        //     console.log("Received message:", data);
+                        }
+                    } catch (e) {
+                        console.error("Error parsing WebSocket message:", event.data, e);
+                    }
+                };
+
+                websocket.onerror = (error) => {
+                    console.error("WebSocket error:", error);
+                    // sttStatusMessage.textContent = "WebSocket connection error.";
+                    // The onclose event will also fire, which calls stopListeningProcess for cleanup.
+                };
+
+                websocket.onclose = (event) => {
+                    console.log(`WebSocket closed. Code: ${event.code}, Reason: "${event.reason}", Clean: ${event.wasClean}`);
+                    // This check ensures we only trigger the stop process if it was an unexpected closure
+                    // during an active session. If we called stopListeningProcess ourselves, isListening would be false.
+                    if (isListening) { 
+                        // sttStatusMessage.textContent = `Connection lost (Code: ${event.code})`;
+                        stopListeningProcess();
+                    }
+                };
+                return true;
+            } catch (error) { 
+                console.error('Error instantiating WebSocket:', error);
+                // sttStatusMessage.textContent = "Failed to create WebSocket connection.";
+                return false;
+            }
+        }          function sendAudioData(float32AudioData, sourceSampleRate = 16000) {
+            // Check WebSocket state first and log if there's an issue
+            if (!websocket) {
+                console.warn("WebSocket is null, cannot send audio data");
+                return;
+            }
+            if (websocket.readyState !== WebSocket.OPEN) {
+                console.warn(`WebSocket not ready, state: ${websocket.readyState} (CONNECTING=0, OPEN=1, CLOSING=2, CLOSED=3)`);
+                return;
+            }
+            
+            if (websocket && websocket.readyState === WebSocket.OPEN) {
+                // Validate audio data
+                if (!float32AudioData || float32AudioData.length === 0) {
+                    console.warn("Empty audio data received, skipping send");
+                    return;
+                }
+                
+                // Check for silence or invalid audio
+                let sumSquared = 0;
+                let hasValidSamples = false;
+                for (let i = 0; i < float32AudioData.length; i++) {
+                    const sample = float32AudioData[i];
+                    if (!isNaN(sample) && isFinite(sample)) {
+                        sumSquared += sample * sample;
+                        hasValidSamples = true;
+                    }
+                }
+                
+                if (!hasValidSamples) {
+                    console.warn("No valid audio samples found, skipping send");
+                    return;
+                }
+                  const rms = Math.sqrt(sumSquared / float32AudioData.length);
+                
+                // Skip completely silent audio (but allow low-level audio) - lowered threshold
+                if (rms < 0.00001) { // Reduced from 0.0001 to 0.00001
+                    if (logCounter % 50 === 0) { // Log occasionally to avoid spam
+                        console.debug(`Silent audio chunk detected (RMS: ${rms.toFixed(8)}), skipping`);
+                    }
+                    logCounter++;
+                    return;
+                }
+                
+                // Add periodic RMS logging to understand audio levels
+                // if (logCounter % 25 === 0) {
+                //     console.debug(`Audio RMS: ${rms.toFixed(6)} (threshold: 0.00001)`);
+                // }
+                
+                let processedAudio = float32AudioData;
+                
+                // Apply simple resampling if source rate is not 16kHz
+                if (sourceSampleRate !== 16000) {
+                    const ratio = sourceSampleRate / 16000;
+                    const targetLength = Math.floor(float32AudioData.length / ratio);
+                    const resampled = new Float32Array(targetLength);
+                    
+                    for (let i = 0; i < targetLength; i++) {
+                        const sourceIndex = i * ratio;
+                        const index = Math.floor(sourceIndex);
+                        const fraction = sourceIndex - index;
+                        
+                        if (index + 1 < float32AudioData.length) {
+                            // Linear interpolation
+                            resampled[i] = float32AudioData[index] * (1 - fraction) + 
+                                          float32AudioData[index + 1] * fraction;
+                        } else {
+                            resampled[i] = float32AudioData[index] || 0;
+                        }
+                    }
+                    processedAudio = resampled;
+                    
+                    // if (logCounter % 100 === 0) { // Log resampling occasionally
+                    //     console.debug(`Resampled audio: ${float32AudioData.length} -> ${processedAudio.length} samples (${sourceSampleRate}Hz -> 16000Hz)`);
+                    // }
+                }
+                
+                // Convert to 16-bit PCM with proper clamping
+                const pcmData = new Int16Array(processedAudio.length);
+                for (let i = 0; i < processedAudio.length; i++) {
+                    // Clamp to [-1, 1] range and convert to 16-bit PCM
+                    const clampedSample = Math.max(-1, Math.min(1, processedAudio[i]));
+                    pcmData[i] = clampedSample < 0 ? clampedSample * 0x8000 : clampedSample * 0x7FFF;
+                }
+                
+                // Send audio data
+                websocket.send(pcmData.buffer);
+                  // Enhanced logging with audio quality metrics
+                // if (logCounter % 5 === 0) { // Increased frequency from every 10 to every 5
+                //     console.log(`[Audio Send] Chunk #${logCounter}: ${pcmData.length} samples, RMS: ${rms.toFixed(4)}, Range: [${Math.min(...pcmData)}, ${Math.max(...pcmData)}]`);
+                // }
+                logCounter++;
+            }
+        }
+        
+        // --- Audio Processing & Visualization ---
+
+        function cleanupAudioResources() {
+            console.log("Cleaning up audio resources.");
+            if (animationFrameId) cancelAnimationFrame(animationFrameId);
+            if (microphoneStream) microphoneStream.getTracks().forEach(track => track.stop());
+            if (window.scriptProcessor) window.scriptProcessor.disconnect();
+            if (audioContext && audioContext.state !== 'closed') audioContext.close();
+            
+            animationFrameId = null;
+            microphoneStream = null;
+            window.scriptProcessor = null;
+            audioContext = null;
+            analyser = null;
+            dataArray = null;
+        }        async function setupAudioProcessing() {
+            try {
+                // Create audio context with target sample rate
+                audioContext = new (window.AudioContext || window.webkitAudioContext)({
+                    sampleRate: 16000  // Request 16kHz sample rate
+                });
+                if (audioContext.state === 'suspended') await audioContext.resume();
+                
+                // console.log(`[MIC DEBUG] AudioContext created with sample rate: ${audioContext.sampleRate}Hz, state: ${audioContext.state}`);
+                  // Request microphone with high-quality audio settings
+                // console.log("[MIC DEBUG] Requesting microphone access...");
+                microphoneStream = await navigator.mediaDevices.getUserMedia({ 
+                    audio: { 
+                        sampleRate: { ideal: 16000, min: 8000, max: 48000 },
+                        channelCount: 1, 
+                        echoCancellation: true, 
+                        noiseSuppression: true,
+                        autoGainControl: false,  // Disable AGC for better STT results
+                        latency: { ideal: 0.01 } // Low latency for real-time processing
+                    }, 
+                    video: false 
+                });
+                
+                // console.log("[MIC DEBUG] Microphone stream obtained:", microphoneStream);
+                // console.log("[MIC DEBUG] Audio tracks:", microphoneStream.getAudioTracks());
+                
+                // Log track settings
+                const audioTrack = microphoneStream.getAudioTracks()[0];
+                // if (audioTrack) {
+                //     console.log("[MIC DEBUG] Audio track settings:", audioTrack.getSettings());
+                //     console.log("[MIC DEBUG] Audio track constraints:", audioTrack.getConstraints());
+                //     console.log("[MIC DEBUG] Audio track state:", audioTrack.readyState);
+                // } else {
+                //     console.error("[MIC DEBUG] No audio track found in stream!");
+                // }
+                
+                const source = audioContext.createMediaStreamSource(microphoneStream);
+                // console.log("[MIC DEBUG] MediaStreamSource created:", source);
+                  // Set up analyzer for visualization
+                analyser = audioContext.createAnalyser();
+                analyser.fftSize = 2048;
+                analyser.smoothingTimeConstant = 0.3;
+                bufferLength = analyser.frequencyBinCount;
+                dataArray = new Uint8Array(bufferLength);
+                source.connect(analyser);
+                
+                // console.log("[MIC DEBUG] Analyzer setup: fftSize=" + analyser.fftSize + ", bufferLength=" + bufferLength);
+                
+                // Test analyzer immediately after connection
+                // setTimeout(() => {
+                //     analyser.getByteFrequencyData(dataArray);
+                //     const testMax = Math.max(...dataArray);
+                //     const testAvg = dataArray.reduce((a, b) => a + b, 0) / dataArray.length;
+                //     console.log(`[MIC DEBUG] Initial analyzer test: Max=${testMax}, Avg=${testAvg.toFixed(2)}, First 10: [${Array.from(dataArray.slice(0, 10)).join(', ')}]`);
+                // }, 100);
+                
+                // Create resampler if needed
+                let resampledSource = source;
+                if (audioContext.sampleRate !== 16000) {
+                    // console.warn(`Sample rate mismatch: AudioContext=${audioContext.sampleRate}Hz, target=16000Hz. Audio will be processed at ${audioContext.sampleRate}Hz.`);
+                    // Note: We'll handle resampling in sendAudioData function
+                }
+                  // Use ScriptProcessor with appropriate buffer size for real-time processing
+                const bufferSize = 4096; // Larger buffer for better performance
+                const scriptProcessor = audioContext.createScriptProcessor(bufferSize, 1, 1);
+                
+                // console.log("[MIC DEBUG] ScriptProcessor created with buffer size:", bufferSize);
+                
+                scriptProcessor.onaudioprocess = (event) => {
+                    if (!isListening) return;
+                    const inputData = event.inputBuffer.getChannelData(0);
+                    
+                    // Debug: Log audio input data occasionally
+                    if (logCounter % 100 === 0) {
+                        // const inputMax = Math.max(...inputData);
+                        // const inputMin = Math.min(...inputData);
+                        // const inputRMS = Math.sqrt(inputData.reduce((sum, val) => sum + val * val, 0) / inputData.length);
+                        // console.log(`[MIC DEBUG] ScriptProcessor input - Length: ${inputData.length}, Max: ${inputMax.toFixed(6)}, Min: ${inputMin.toFixed(6)}, RMS: ${inputRMS.toFixed(6)}`);
+                        
+                        // if (inputMax === 0 && inputMin === 0) {
+                        //     console.warn("[MIC DEBUG] *** SILENT INPUT DETECTED *** - No audio data in ScriptProcessor");
+                        // }
+                    }
+                    
+                    // Update analyzer data for visualization
+                    analyser.getByteFrequencyData(dataArray);
+                    
+                    if (isRecording) {
+                        // Add debug logging every 50 audio chunks
+                        // if (logCounter % 50 === 0) {
+                        //     console.debug(`Sending audio chunk #${logCounter}, ${inputData.length} samples`);
+                        // }
+                        sendAudioData(inputData, audioContext.sampleRate);
+                    }
+                };
+                
+                resampledSource.connect(scriptProcessor);
+                
+                // Connect to destination through a muted gain node to keep the processor running
+                const gainNode = audioContext.createGain();
+                gainNode.gain.setValueAtTime(0, audioContext.currentTime);
+                scriptProcessor.connect(gainNode);
+                gainNode.connect(audioContext.destination);                window.scriptProcessor = scriptProcessor; // Store for cleanup
+                
+                // DIAGNOSTIC: Test if we can manually generate audio to verify the pipeline
+                // console.log("[MIC DEBUG] Setting up test oscillator for 2 seconds to verify audio pipeline...");
+                // const testOscillator = audioContext.createOscillator();
+                // const testGain = audioContext.createGain();
+                // testOscillator.frequency.setValueAtTime(440, audioContext.currentTime); // A4 note
+                // testGain.gain.setValueAtTime(0.01, audioContext.currentTime); // Very quiet
+                // testOscillator.connect(testGain);
+                // testGain.connect(analyser);
+                // testOscillator.start(audioContext.currentTime);
+                // testOscillator.stop(audioContext.currentTime + 2); // Stop after 2 seconds
+                
+                // testOscillator.onended = () => {
+                //     console.log("[MIC DEBUG] Test oscillator ended. If analyzer showed data during test, the pipeline works.");
+                // };
+                
+                return true;
+            } catch (err) {
+                console.error('Error setting up audio processing:', err);
+                statusMessage.textContent = `Mic Error: ${err.message}.`;
+                sttStatusMessage.textContent = "Check browser permissions.";
+                return false;
+            }
+        }        // --- Main Drawing & VAD Loop ---
+        function drawVisualization() {
+            if (!isListening) {
+                if(animationFrameId) cancelAnimationFrame(animationFrameId);
+                animationFrameId = null;
+                return;
+            }
+
+            animationFrameId = requestAnimationFrame(drawVisualization);
+            const now = Date.now();
+              // --- Enhanced VAD Logic ---
+            if (analyser && dataArray) {
+                // First, get raw analyzer data
+                analyser.getByteFrequencyData(dataArray);
+                
+                // DEBUG: Log raw analyzer data every 30 frames
+                // if (logCounter % 30 === 0) {
+                //     const rawSample = Array.from(dataArray.slice(0, 10)); // First 10 values
+                //     const maxRaw = Math.max(...dataArray);
+                //     const avgRaw = dataArray.reduce((a, b) => a + b, 0) / dataArray.length;
+                //     console.log(`[RAW ANALYZER] Max: ${maxRaw}, Avg: ${avgRaw.toFixed(2)}, Sample: [${rawSample.join(', ')}]`);
+                // }
+                
+                let sumOfSquares = 0;
+                let maxValue = 0;
+                let nonZeroCount = 0;
+                
+                for (let i = 0; i < bufferLength; i++) {
+                    const value = dataArray[i] / 255.0;
+                    sumOfSquares += value * value;
+                    maxValue = Math.max(maxValue, value);
+                    if (dataArray[i] > 0) nonZeroCount++;
+                }
+                
+                const rms = Math.sqrt(sumOfSquares / bufferLength);
+                const currentActualActivity = rms * 100;
+                
+                // DEBUG: Log detailed audio analysis every 15 frames
+                // if (logCounter % 15 === 0) {
+                //     console.log(`[AUDIO ANALYSIS] RMS: ${rms.toFixed(4)}, Activity: ${currentActualActivity.toFixed(2)}, Max: ${maxValue.toFixed(4)}, NonZero: ${nonZeroCount}/${bufferLength}`);
+                // }
+                
+                // Maintain activity history for more stable VAD
+                activityHistory.push(currentActualActivity);
+                if (activityHistory.length > ACTIVITY_HISTORY_SIZE) {
+                    activityHistory.shift();
+                }
+                
+                // Calculate smoothed activity level
+                const avgActivity = activityHistory.reduce((a, b) => a + b, 0) / activityHistory.length;
+                const peakActivity = Math.max(...activityHistory);
+                
+                // DEBUG: Log activity history details every 20 frames
+                // if (logCounter % 20 === 0) {
+                //     console.log(`[ACTIVITY HISTORY] History: [${activityHistory.map(a => a.toFixed(1)).join(', ')}]`);
+                //     console.log(`[ACTIVITY METRICS] Avg: ${avgActivity.toFixed(2)}, Peak: ${peakActivity.toFixed(2)}, Current: ${currentActualActivity.toFixed(2)}`);
+                // }
+                
+                // Use the highest recent activity, but let it decay over time.
+                activityLevel = Math.max(avgActivity, activityLevel * (1 - ACTIVITY_DECAY));                const wasRecording = isRecording;
+                
+                // Enhanced voice activity detection with detailed threshold debugging
+                const avgThresholdMet = avgActivity > SILENCE_THRESHOLD;
+                const peakThresholdMet = peakActivity > (SILENCE_THRESHOLD * 1.5);
+                const isVoiceDetected = avgThresholdMet && peakThresholdMet;
+                isVoiceActive = isVoiceDetected; // Update voice active state for UI
+                
+                // CRITICAL DEBUG: Log threshold decision EVERY frame for 10 seconds
+                // if (logCounter < 300) { // First 10 seconds at 30fps
+                //     console.log(`[THRESHOLD DEBUG ${logCounter}] avg(${avgActivity.toFixed(2)}) > ${SILENCE_THRESHOLD} = ${avgThresholdMet}, peak(${peakActivity.toFixed(2)}) > ${(SILENCE_THRESHOLD * 1.5)} = ${peakThresholdMet}, RESULT: ${isVoiceDetected}`);
+                // }
+                  if (isVoiceDetected) {
+                    if (!wasRecording && recordingStartTime === 0) {
+                        recordingStartTime = now;
+                        // console.log(`[VAD] *** VOICE DETECTED *** (avg: ${avgActivity.toFixed(2)}, peak: ${peakActivity.toFixed(2)}) - Starting timer at ${recordingStartTime}`);
+                    }
+                    
+                    // Only start recording if we've had sustained activity
+                    const timeElapsed = recordingStartTime > 0 ? now - recordingStartTime : 0;
+                    const shouldStartRecording = timeElapsed >= MIN_ACTIVITY_DURATION || wasRecording;
+                    
+                    // DEBUG: Log timing decision every frame when voice is detected
+                    // if (logCounter < 300 || logCounter % 5 === 0) {
+                    //     console.log(`[TIMING DEBUG] timeElapsed=${timeElapsed}ms, MIN_ACTIVITY_DURATION=${MIN_ACTIVITY_DURATION}ms, wasRecording=${wasRecording}, shouldStartRecording=${shouldStartRecording}`);
+                    // }
+                    
+                    if (shouldStartRecording) {
+                        if (!wasRecording) {
+                            // console.log(`[VAD] *** STARTING RECORDING *** after ${timeElapsed}ms of sustained voice activity`);
+                            // console.log(`[VAD] Recording state change: ${wasRecording} -> TRUE`);
+                        }
+                        isRecording = true;
+                        silenceStart = 0; // Reset silence timer
+                    } else {
+                        // console.log(`[VAD] Voice detected but waiting for sustained activity: ${timeElapsed}ms / ${MIN_ACTIVITY_DURATION}ms (need ${MIN_ACTIVITY_DURATION - timeElapsed}ms more)`);
+                    }
+                } else { // Below voice threshold
+                    // DEBUG: Log why voice was not detected (first 300 frames or occasionally)
+                    // if (logCounter < 300 || logCounter % 30 === 0) {
+                    //     console.log(`[VAD] Voice NOT detected - avg(${avgActivity.toFixed(2)}) <= ${SILENCE_THRESHOLD}=${!avgThresholdMet} OR peak(${peakActivity.toFixed(2)}) <= ${(SILENCE_THRESHOLD * 1.5)}=${!peakThresholdMet}`);
+                    // }
+                    
+                    if (wasRecording) { // We were just recording, now we are not.
+                        // console.log(`[VAD] *** VOICE ACTIVITY ENDED *** (avg: ${avgActivity.toFixed(2)}, peak: ${peakActivity.toFixed(2)}) - Starting silence timer`);
+                        silenceStart = now; // Start the silence timer.
+                    }
+                    if (silenceStart > 0 && (now - silenceStart) > MIN_SILENCE_DURATION_TO_PAUSE) {
+                        // console.log(`[VAD] *** STOPPING RECORDING *** after ${now - silenceStart}ms of silence (threshold: ${MIN_SILENCE_DURATION_TO_PAUSE}ms)`);
+                        // console.log(`[VAD] Recording state change: ${isRecording} -> FALSE`);
+                        isRecording = false; // Pause recording after 2s of silence.
+                        recordingStartTime = 0; // Reset recording start time
+                    }
+                }
+                  // Debug logging for VAD tuning - more frequent
+                // if (logCounter % 15 === 0) { // Reduced from 30 to 15 for more frequent logging
+                //     console.debug(`VAD Status: recording=${isRecording}, activity=${avgActivity.toFixed(2)}, peak=${peakActivity.toFixed(2)}, threshold=${SILENCE_THRESHOLD}, timeElapsed=${isVoiceDetected ? now - recordingStartTime : 'N/A'}ms`);
+                // }
+            }
+            
+            // --- Disconnect on Prolonged Silence ---
+            if (!isRecording && silenceStart > 0 && (now - silenceStart > MAX_SILENCE_DURATION_TO_DISCONNECT)) {
+                console.log(`Prolonged silence (${MAX_SILENCE_DURATION_TO_DISCONNECT}ms) detected. Stopping session.`);
+                stopListeningProcess(true); // true indicates it was due to silence
+                return; // Exit loop
+            }            // --- Drawing Logic ---
+            // Show visualization if we're recording OR if voice is actively detected (even if not yet recording)
+            if (!isRecording && !isVoiceActive) {
+                drawDefaultCanvasState(); // Show "Paused" message only when truly silent
+            } else {
+                // Active visualization - show this for both recording AND voice detection
+                canvasCtx.clearRect(0, 0, canvas.width, canvas.height);
+
+                const centerX = canvas.width / 2;
+                const centerY = canvas.height / 2;
+                const radius = Math.max(50, Math.min(canvas.width, canvas.height) * 0.3);
+                const numBars = 128; // Fewer bars for a cleaner look
+
+                for (let i = 0; i < numBars; i++) {
+                    const barIndex = Math.floor(i * (bufferLength / numBars));
+                    const dataValue = dataArray[barIndex] / 255.0;
+                    
+                    let barHeight = dataValue * Math.min(canvas.width, canvas.height) * 0.35;
+                    barHeight = Math.max(2, barHeight); 
+
+                    const angle = (i / numBars) * 2 * Math.PI - (Math.PI / 2);
+                    const x1 = centerX + radius * Math.cos(angle);
+                    const y1 = centerY + radius * Math.sin(angle);
+                    const x2 = centerX + (radius + barHeight) * Math.cos(angle);
+                    const y2 = centerY + (radius + barHeight) * Math.sin(angle);                    const hue = 190 + (dataValue * 50);
+                    canvasCtx.strokeStyle = `hsl(${hue % 360}, 85%, 50%)`;
+                    canvasCtx.lineWidth = Math.max(1.5, (2 * Math.PI * radius) / numBars * 0.7);
+                    canvasCtx.lineCap = 'round';
+
+                    canvasCtx.beginPath();
+                    canvasCtx.moveTo(x1, y1);
+                    canvasCtx.lineTo(x2, y2);
+                    canvasCtx.stroke();
+                }
+            }
+        }
+        
+        // --- Process Control ---
+        
+        async function startListeningProcess() {
+            if (isListening) return;
+            console.log("Starting listening process...");
+            if (startButton) startButton.disabled = true;            // Reset states for a fresh session
+            isRecording = false;
+            isVoiceActive = false;
+            silenceStart = 0;
+            activityLevel = 0;
+            activityHistory = [];
+            recordingStartTime = 0;
+            logCounter = 0;
+            statusMessage.textContent = "Initializing microphone...";
+            sttStatusMessage.textContent = "";
+
+            if (!await setupAudioProcessing()) {
+                stopListeningProcess(); // Cleanup and revert to start screen on mic failure
+                return;
+            }
+            
+            statusMessage.textContent = "Connecting to speech service...";
+            if (!setupWebSocket()) {
+                stopListeningProcess(); // Cleanup and revert on websocket init failure
+                return;
+            }
+
+            // Wait for WebSocket to open
+            try {
+                await new Promise((resolve, reject) => {
+                    const timeout = setTimeout(() => reject(new Error("Connection timeout")), 5000);
+                    websocket.addEventListener('open', () => { clearTimeout(timeout); resolve(); }, { once: true });
+                    websocket.addEventListener('error', (err) => { clearTimeout(timeout); reject(err); }, { once: true });
+                    websocket.addEventListener('close', () => { clearTimeout(timeout); reject(new Error("Connection closed before opening.")); }, { once: true });
+                });
+
+                console.log("Connection successful. Starting visualization loop.");
+                isListening = true;
+                statusMessage.textContent = "Listening... Speak now.";
+                drawVisualization();
+
+            } catch (error) {
+                console.error("Failed to establish WebSocket connection:", error);
+                statusMessage.textContent = "Error connecting to service.";
+                sttStatusMessage.textContent = "Please try again.";
+                stopListeningProcess(); // REFACTORED: Unified cleanup and UI reset
+            }
+        }
+        
+        function stopListeningProcess(dueToSilence = false) {
+            console.log("Stopping listening process.");
+            const wasListening = isListening;
+
+            isListening = false;
+            isRecording = false;
+            
+            cleanupAudioResources();
+            
+            if (websocket && websocket.readyState === WebSocket.OPEN) {
+                websocket.close(1000, "Client stopping session.");
+            }
+            websocket = null;
+            
+            if (wasListening) {
+                statusMessage.textContent = dueToSilence ? 'Session ended (silence).' : 'Session stopped.';
+                sttStatusMessage.textContent = 'Ready for a new session.';
+            }
+            
+            mainApp.style.display = 'none';
+            startScreen.style.display = 'flex';
+            if (startButton) startButton.disabled = false; 
+        }
+
+        // --- Event Listeners ---
+        
+        startButton.addEventListener('click', async () => {
+            startButton.disabled = true;
+            startScreen.style.display = 'none';
+            mainApp.style.display = 'flex';
+            resizeCanvas(); 
+            drawDefaultCanvasState(); // Show an initial "initializing" state
+            await startListeningProcess(); 
+        });
+        
+        window.addEventListener('resize', resizeCanvas);
+
+    </script>
+</body>
+</html>
